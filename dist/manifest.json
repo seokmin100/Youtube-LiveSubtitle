@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Live Translator",
+  "version": "0.1.0",
+  "description": "YouTube 라이브 영상 UI를 수정하고 실시간 번역 오버레이를 표시합니다.",
+
+  // "icons": {
+  //   "16": "icons/icon16.png",
+  //   "48": "icons/icon48.png",
+  //   "128": "icons/icon128.png"
+  // },
+
+  "permissions": [
+    "storage"
+  ],
+
+  "host_permissions": [
+    "https://www.youtube.com/*"
+  ],
+
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["content/index.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "ui/**",
+        "icons/**",
+        "img/**"
+      ],
+      "matches": ["https://www.youtube.com/*"]
+    }
+  ]
+}
