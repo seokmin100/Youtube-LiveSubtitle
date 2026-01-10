@@ -18,5 +18,5 @@
     "sourceMap": true,
     "resolveJsonModule": true
   },
-  "include": ["src"]
+  "include": ["src", "dist/stt-processor.js"]
 }

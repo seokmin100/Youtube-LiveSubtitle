@@ -31,7 +31,8 @@
       "resources": [
         "ui/**",
         "icons/**",
-        "img/**"
+        "img/**",
+        "stt-processor.js"
       ],
       "matches": ["https://www.youtube.com/*"]
     }
