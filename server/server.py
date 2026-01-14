@@ -1,17 +1,20 @@
 import asyncio
 import websockets
 import numpy as np
-import soundfile as sf
-import whisper
-import os
-
-model = whisper.load_model("base")
+from faster_whisper import WhisperModel
 
 SAMPLE_RATE = 16000
-BUFFER_SECONDS = 2
-BUFFER_SIZE = SAMPLE_RATE * BUFFER_SECONDS
+BUFFER_SECONDS = 1.5   # 🔥 작을수록 실시간
+BUFFER_SIZE = int(SAMPLE_RATE * BUFFER_SECONDS)
 
-audio_buffer = np.array([], dtype=np.float32)
+# CPU 최적화 모델
+model = WhisperModel(
+    "base",
+    device="cpu",
+    compute_type="int8"   # ⭐ 핵심 (속도 대폭 ↑)
+)
+
+audio_buffer = np.empty(0, dtype=np.float32)
 
 async def handler(ws):
     global audio_buffer
@@ -21,30 +24,39 @@ async def handler(ws):
         if not isinstance(message, bytes):
             continue
 
-        # Float32 PCM
         chunk = np.frombuffer(message, dtype=np.float32)
         audio_buffer = np.concatenate([audio_buffer, chunk])
 
-        if len(audio_buffer) >= BUFFER_SIZE:
-            audio = audio_buffer[:BUFFER_SIZE]
-            audio_buffer = audio_buffer[BUFFER_SIZE:]
+        if len(audio_buffer) < BUFFER_SIZE:
+            continue
 
-            os.makedirs("temp", exist_ok=True)
-            wav_path = "temp/audio.wav"
+        audio = audio_buffer[:BUFFER_SIZE]
+        audio_buffer = audio_buffer[BUFFER_SIZE:]
 
-            # WAV 저장
-            sf.write(wav_path, audio, SAMPLE_RATE)
+        # 🔥 faster-whisper는 바로 numpy 입력 가능
+        segments, info = model.transcribe(
+            audio,
+            language=None,        # 자동 언어 감지
+            vad_filter=True,      # 무음 제거
+            beam_size=1           # 실시간용
+        )
 
-            # Whisper STT
-            result = model.transcribe(wav_path, language="en")
-            text = result.get("text", "").strip()
+        text = ""
+        for seg in segments:
+            text += seg.text
 
-            if text:
-                await ws.send(text)
+        text = text.strip()
+        if text:
+            await ws.send(text)
 
 async def main():
-    async with websockets.serve(handler, "0.0.0.0", 3000, max_size=None):
-        print("STT Server started :3000")
+    async with websockets.serve(
+        handler,
+        "0.0.0.0",
+        3000,
+        max_size=None
+    ):
+        print("🚀 Faster-Whisper STT Server started :3000")
         await asyncio.Future()
 
 asyncio.run(main())
