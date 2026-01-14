@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "YouTube Live Translator",
+  "name": "YouTube LiveSubtitle",
   "version": "0.1.0",
-  "description": "YouTube 라이브 영상 UI를 수정하고 실시간 번역 오버레이를 표시합니다.",
+  "description": "YouTube 라이브 자막을 실시간으로 번역해주는 확장 프로그램",
 
   // "icons": {
   //   "16": "icons/icon16.png",

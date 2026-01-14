@@ -9,7 +9,7 @@ async function startAudioCapture(lang = "auto") {
         return console.error("유튜브 비디오를 찾을 수 없습니다.");
     stopAudioCapture();
     // WebSocket 연결
-    ws = new WebSocket("wss://livesubtitile.seokmin100.com");
+    ws = new WebSocket("wss://livesubtitle.seokmin100.com");
     ws.binaryType = "arraybuffer";
     ws.onopen = () => console.log("WebSocket 연결 성공");
     ws.onmessage = (e) => displaySubtitle(e.data);
