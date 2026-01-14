@@ -34,14 +34,18 @@ async def handler(ws):
             segments, _ = model.transcribe(
                 audio,
                 language="ko",
-                beam_size=1,
                 vad_filter=True,
-                condition_on_previous_text=False
+                vad_parameters=dict(
+                    min_silence_duration_ms=500
+                ),
+                beam_size=5,
+                best_of=5,
+                temperature=0.0
             )
 
             text = "".join(seg.text for seg in segments).strip()
             if text:
-                print("STT:", text)
+                #print("STT:", text)
                 await ws.send(text)
 
 async def main():

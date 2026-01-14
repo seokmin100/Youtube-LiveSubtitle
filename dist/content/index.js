@@ -30,10 +30,29 @@ async function startAudioCapture(lang = "auto") {
     const source = audioCtx.createMediaStreamSource(stream);
     // AudioWorkletNode 생성
     sttNode = new AudioWorkletNode(audioCtx, "stt-processor");
+    let pcmBuffer = [];
+    let pcmLength = 0;
+    const TARGET_SAMPLES = 16000 * 1.0; // 1초
     sttNode.port.onmessage = (e) => {
         if (!ws || ws.readyState !== WebSocket.OPEN)
             return;
-        ws.send(e.data); // 서버로 ArrayBuffer 전송
+        const { audio, rms } = e.data;
+        // 디버그용 (처음엔 꼭 찍어라)
+        // console.log("RMS:", rms);
+        pcmBuffer.push(audio);
+        pcmLength += audio.byteLength / 2; // int16 = 2 bytes
+        if (pcmLength >= TARGET_SAMPLES) {
+            const merged = new Int16Array(pcmLength);
+            let offset = 0;
+            for (const buf of pcmBuffer) {
+                const arr = new Int16Array(buf);
+                merged.set(arr, offset);
+                offset += arr.length;
+            }
+            ws.send(merged.buffer);
+            pcmBuffer = [];
+            pcmLength = 0;
+        }
     };
     source.connect(sttNode);
     source.connect(audioCtx.destination); // 원본 소리 재생
