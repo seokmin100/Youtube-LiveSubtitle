@@ -1,82 +1,73 @@
 import asyncio
 import websockets
+import json
 import numpy as np
 from faster_whisper import WhisperModel
-from concurrent.futures import ThreadPoolExecutor
 
-model = WhisperModel(
-    "medium",
+# ---------------- CONFIG ----------------
+SAMPLE_RATE = 16000
+CHUNK_SEC = 1.0
+CHUNK_SIZE = int(SAMPLE_RATE * CHUNK_SEC)
+
+# ---------------- MODEL ----------------
+whisper = WhisperModel(
+    "small",
     device="cpu",
     compute_type="int8",
-    cpu_threads=24,    # 전체의 70~80%
-    num_workers=3      # 병렬 chunk 처리
+    cpu_threads=24,
+    num_workers=3
 )
 
-executor = ThreadPoolExecutor(max_workers=1)
+# ---------------- WORKER ----------------
+async def whisper_worker(queue: asyncio.Queue, ws):
+    while True:
+        audio = await queue.get()
+        try:
+            segments, _ = whisper.transcribe(
+                audio,
+                language="ko",
+                beam_size=1,
+                best_of=3,
+                temperature=0.0,
+                condition_on_previous_text=False
+            )
+            text = "".join(s.text for s in segments).strip()
+            if text:
+                await ws.send(json.dumps({
+                    "type": "final",
+                    "text": text
+                }))
+        except Exception as e:
+            print("Whisper error:", e)
 
-SAMPLE_RATE = 16000
-BUFFER_SECONDS = 1
-BUFFER_SIZE = SAMPLE_RATE * BUFFER_SECONDS
-
-async def run_stt(audio):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        executor,
-        lambda: model.transcribe(
-            audio,
-            language="ko",
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=300),
-            beam_size=1,
-            temperature=0.0,
-            condition_on_previous_text=False
-        )
-    )
-
+# ---------------- WS ----------------
 async def handler(ws):
-    audio_buffer = np.array([], dtype=np.float32)
-    stt_busy = False
-
     print("Client connected")
 
+    buffer = np.zeros(0, dtype=np.float32)
+    queue = asyncio.Queue(maxsize=1)
+
+    asyncio.create_task(whisper_worker(queue, ws))
+
     async for message in ws:
-        if isinstance(message, str):
-            if message.startswith("ping:"):
-                await ws.send(message)
-        
         if not isinstance(message, bytes):
             continue
 
-        # Int16 PCM → float32
-        chunk = np.frombuffer(message, dtype=np.int16).astype(np.float32) / 32768.0
-        audio_buffer = np.concatenate([audio_buffer, chunk])
+        chunk = np.frombuffer(message, np.int16).astype(np.float32) / 32768.0
+        buffer = np.concatenate([buffer, chunk])
 
-        # STT 중이면 과거 오디오 버림
-        if stt_busy:
-            audio_buffer = audio_buffer[-BUFFER_SIZE:]
-            continue
+        if len(buffer) >= CHUNK_SIZE:
+            audio = buffer[-CHUNK_SIZE:]  # 최신만
+            buffer = buffer[-CHUNK_SIZE:] # ring
 
-        if len(audio_buffer) >= BUFFER_SIZE:
-            audio = audio_buffer[:BUFFER_SIZE]
-            audio_buffer = audio_buffer[BUFFER_SIZE:]
-            stt_busy = True
+            if queue.full():
+                _ = queue.get_nowait()
 
-            async def stt_task(audio):
-                nonlocal stt_busy
-                try:
-                    segments, _ = await run_stt(audio)
-                    text = "".join(seg.text for seg in segments).strip()
-                    if len(text.replace(" ", "")) >= 3:
-                        await ws.send(text)
-                finally:
-                    stt_busy = False
-
-            asyncio.create_task(stt_task(audio))
-
+            await queue.put(audio)
 
 async def main():
     async with websockets.serve(handler, "0.0.0.0", 3000, max_size=None):
-        print("STT Server started :3000")
+        print("Whisper-only STT server :3000")
         await asyncio.Future()
 
 asyncio.run(main())
