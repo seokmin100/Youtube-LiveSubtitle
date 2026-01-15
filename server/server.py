@@ -4,13 +4,15 @@ import numpy as np
 from faster_whisper import WhisperModel
 
 model = WhisperModel(
-    "base",
+    "medium",
     device="cpu",
     compute_type="int8"
+    cpu_threads=24,    # 전체의 70~80%
+    num_workers=3      # 병렬 chunk 처리
 )
 
 SAMPLE_RATE = 16000
-BUFFER_SECONDS = 3
+BUFFER_SECONDS = 1
 BUFFER_SIZE = SAMPLE_RATE * BUFFER_SECONDS
 
 async def handler(ws):
@@ -18,6 +20,10 @@ async def handler(ws):
     print("Client connected")
 
     async for message in ws:
+        if isinstance(message, str):
+            if message.startswith("ping:"):
+                await ws.send(message)
+        
         if not isinstance(message, bytes):
             continue
 
@@ -34,10 +40,11 @@ async def handler(ws):
                 language="ko",
                 vad_filter=True,
                 vad_parameters=dict(
-                    min_silence_duration_ms=500
+                    min_silence_duration_ms=300
                 ),
-                beam_size=5,
-                best_of=5,
+                condition_on_previous_text=False,
+                beam_size=1,
+                # best_of=5,
                 temperature=0.0
             )
 
@@ -47,6 +54,7 @@ async def handler(ws):
                 continue
 
             await ws.send(text)
+
 
 async def main():
     async with websockets.serve(handler, "0.0.0.0", 3000, max_size=None):

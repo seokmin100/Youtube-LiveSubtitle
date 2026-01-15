@@ -2,6 +2,8 @@
 let ws: WebSocket | null = null;
 let audioCtx: AudioContext | null = null;
 let sttNode: AudioWorkletNode | null = null;
+let pingTimer: number | null = null;
+let lastRTT: number | null = null;
 
 async function startAudioCapture(lang: string = "auto") {
   const video = document.querySelector<HTMLVideoElement>("video");
@@ -12,13 +14,31 @@ async function startAudioCapture(lang: string = "auto") {
   // WebSocket 연결
   ws = new WebSocket("wss://livesubtitle.seokmin100.com");
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => console.log("WebSocket 연결 성공");
-  ws.onmessage = (e) => displaySubtitle(e.data as string);
+  ws.onopen = () => {
+    console.log("WebSocket 연결 성공");
+
+    // 🔥 RTT 측정용 ping
+    pingTimer = window.setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(`ping:${performance.now()}`);
+      }
+    }, 1000); // 1초 주기
+  };
+  ws.onmessage = (e) => {
+    if (typeof e.data === "string" && e.data.startsWith("ping:")) {
+      const sent = Number(e.data.slice(5));
+      lastRTT = performance.now() - sent;
+      return;
+    }
+
+    displaySubtitle(e.data as string);
+  };
+
   ws.onclose = () => console.log("WebSocket 종료");
   ws.onerror = (e) => console.error("WebSocket 에러", e);
 
   // AudioContext 생성
-  audioCtx = new AudioContext();
+  audioCtx = new AudioContext({ sampleRate: 16000 });
 
   try {
     // AudioWorklet 외부 파일 로드 (확장 환경 안전)
@@ -37,15 +57,16 @@ async function startAudioCapture(lang: string = "auto") {
   
   let pcmBuffer: ArrayBuffer[] = [];
   let pcmLength = 0;
-  const TARGET_SAMPLES = 16000 * 1.0; // 1초
+  const TARGET_SAMPLES = 16000 * 2.5 // 2.5초
 
   sttNode.port.onmessage = (e) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
     const { audio, rms } = e.data;
+    if (!audio || !(audio instanceof ArrayBuffer)) return;
 
-    // 디버그용 (처음엔 꼭 찍어라)
-    // console.log("RMS:", rms);
+    // 디버그용
+    console.log(`RMS: ${rms.toFixed(4)} | RTT: ${lastRTT ? lastRTT.toFixed(1) : "…"} ms`);
 
     pcmBuffer.push(audio);
     pcmLength += audio.byteLength / 2; // int16 = 2 bytes
@@ -68,7 +89,7 @@ async function startAudioCapture(lang: string = "auto") {
   };
 
   source.connect(sttNode);
-  source.connect(audioCtx.destination); // 원본 소리 재생
+  // source.connect(audioCtx.destination); // 원본 소리 재생
   // 필요 시 sttNode.connect(audioCtx.destination);
 }
 
@@ -76,6 +97,12 @@ function stopAudioCapture() {
   if (sttNode) { sttNode.disconnect(); sttNode = null; }
   if (audioCtx) { audioCtx.close(); audioCtx = null; }
   if (ws) { ws.close(); ws = null; }
+
+  if (pingTimer) {
+    clearInterval(pingTimer);
+    pingTimer = null;
+  }
+
   clearSubtitle();
 }
 

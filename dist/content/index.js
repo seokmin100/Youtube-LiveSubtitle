@@ -3,6 +3,8 @@
 let ws = null;
 let audioCtx = null;
 let sttNode = null;
+let pingTimer = null;
+let lastRTT = null;
 async function startAudioCapture(lang = "auto") {
     const video = document.querySelector("video");
     if (!video)
@@ -11,12 +13,27 @@ async function startAudioCapture(lang = "auto") {
     // WebSocket 연결
     ws = new WebSocket("wss://livesubtitle.seokmin100.com");
     ws.binaryType = "arraybuffer";
-    ws.onopen = () => console.log("WebSocket 연결 성공");
-    ws.onmessage = (e) => displaySubtitle(e.data);
+    ws.onopen = () => {
+        console.log("WebSocket 연결 성공");
+        // 🔥 RTT 측정용 ping
+        pingTimer = window.setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(`ping:${performance.now()}`);
+            }
+        }, 1000); // 1초 주기
+    };
+    ws.onmessage = (e) => {
+        if (typeof e.data === "string" && e.data.startsWith("ping:")) {
+            const sent = Number(e.data.slice(5));
+            lastRTT = performance.now() - sent;
+            return;
+        }
+        displaySubtitle(e.data);
+    };
     ws.onclose = () => console.log("WebSocket 종료");
     ws.onerror = (e) => console.error("WebSocket 에러", e);
     // AudioContext 생성
-    audioCtx = new AudioContext();
+    audioCtx = new AudioContext({ sampleRate: 16000 });
     try {
         // AudioWorklet 외부 파일 로드 (확장 환경 안전)
         await audioCtx.audioWorklet.addModule(chrome.runtime.getURL("stt-processor.js"));
@@ -32,13 +49,15 @@ async function startAudioCapture(lang = "auto") {
     sttNode = new AudioWorkletNode(audioCtx, "stt-processor");
     let pcmBuffer = [];
     let pcmLength = 0;
-    const TARGET_SAMPLES = 16000 * 1.0; // 1초
+    const TARGET_SAMPLES = 16000 * 2.5; // 2.5초
     sttNode.port.onmessage = (e) => {
         if (!ws || ws.readyState !== WebSocket.OPEN)
             return;
         const { audio, rms } = e.data;
-        // 디버그용 (처음엔 꼭 찍어라)
-        // console.log("RMS:", rms);
+        if (!audio || !(audio instanceof ArrayBuffer))
+            return;
+        // 디버그용
+        console.log(`RMS: ${rms.toFixed(4)} | RTT: ${lastRTT ? lastRTT.toFixed(1) : "…"} ms`);
         pcmBuffer.push(audio);
         pcmLength += audio.byteLength / 2; // int16 = 2 bytes
         if (pcmLength >= TARGET_SAMPLES) {
@@ -55,7 +74,7 @@ async function startAudioCapture(lang = "auto") {
         }
     };
     source.connect(sttNode);
-    source.connect(audioCtx.destination); // 원본 소리 재생
+    // source.connect(audioCtx.destination); // 원본 소리 재생
     // 필요 시 sttNode.connect(audioCtx.destination);
 }
 function stopAudioCapture() {
@@ -70,6 +89,10 @@ function stopAudioCapture() {
     if (ws) {
         ws.close();
         ws = null;
+    }
+    if (pingTimer) {
+        clearInterval(pingTimer);
+        pingTimer = null;
     }
     clearSubtitle();
 }

@@ -9,7 +9,7 @@ class STTProcessor extends AudioWorkletProcessor {
     }
     const rms = Math.sqrt(sum / input.length);
 
-    // 🔥 너무 작은 소리는 버림
+    // 너무 작은 소리는 버림
     if (rms < 0.01) return true;
 
     const buffer = new Int16Array(input.length);
