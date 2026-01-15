@@ -24,14 +24,46 @@ async function startAudioCapture(lang: string = "auto") {
       }
     }, 1000); // 1초 주기
   };
+
   ws.onmessage = (e) => {
+    // RTT pong
     if (typeof e.data === "string" && e.data.startsWith("ping:")) {
       const sent = Number(e.data.slice(5));
       lastRTT = performance.now() - sent;
       return;
     }
 
-    displaySubtitle(e.data as string);
+    if (typeof e.data !== "string") return;
+
+    let msg: { type: string; text: string };
+    try {
+      msg = JSON.parse(e.data);
+    } catch {
+      // fallback (혹시 서버가 순수 문자열 보내면)
+      displaySubtitle(e.data);
+      return;
+    }
+
+    if (!msg.text) return;
+
+    if (msg.type === "partial") {
+      displaySubtitle(msg.text, {
+        opacity: 0.4,
+        italic: true
+      });
+    }
+
+    if (msg.type === "final_vosk") {
+      displaySubtitle(msg.text, {
+        opacity: 0.7
+      });
+    }
+
+    if (msg.type === "final") {
+      displaySubtitle(msg.text, {
+        opacity: 1.0
+      });
+    }
   };
 
   ws.onclose = () => console.log("WebSocket 종료");
@@ -68,24 +100,25 @@ async function startAudioCapture(lang: string = "auto") {
     // 디버그용
     console.log(`RMS: ${rms.toFixed(4)} | RTT: ${lastRTT ? lastRTT.toFixed(1) : "…"} ms`);
 
-    pcmBuffer.push(audio);
-    pcmLength += audio.byteLength / 2; // int16 = 2 bytes
+    // pcmBuffer.push(audio);
+    // pcmLength += audio.byteLength / 2; // int16 = 2 bytes
 
-    if (pcmLength >= TARGET_SAMPLES) {
-      const merged = new Int16Array(pcmLength);
-      let offset = 0;
+    // if (pcmLength >= TARGET_SAMPLES) {
+    //   const merged = new Int16Array(pcmLength);
+    //   let offset = 0;
 
-      for (const buf of pcmBuffer) {
-        const arr = new Int16Array(buf);
-        merged.set(arr, offset);
-        offset += arr.length;
-      }
+    //   for (const buf of pcmBuffer) {
+    //     const arr = new Int16Array(buf);
+    //     merged.set(arr, offset);
+    //     offset += arr.length;
+    //   }
 
-      ws.send(merged.buffer);
+    //   ws.send(merged.buffer);
 
-      pcmBuffer = [];
-      pcmLength = 0;
-    }
+    //   pcmBuffer = [];
+    //   pcmLength = 0;
+    // }
+    ws.send(audio);
   };
 
   source.connect(sttNode);
@@ -107,7 +140,7 @@ function stopAudioCapture() {
 }
 
 // ---------------- DOM 유틸 ----------------
-function displaySubtitle(text: string) {
+function displaySubtitle(text: string, opts?: { opacity?: number; italic?: boolean }) {
   const player = document.querySelector<HTMLDivElement>(".html5-video-player");
   if (!player) return;
 
@@ -136,6 +169,8 @@ function displaySubtitle(text: string) {
   }
 
   subtitleDiv.textContent = text;
+  subtitleDiv.style.opacity = String(opts?.opacity ?? 1);
+  subtitleDiv.style.fontStyle = opts?.italic ? "italic" : "normal";
 }
 
 function clearSubtitle() {
