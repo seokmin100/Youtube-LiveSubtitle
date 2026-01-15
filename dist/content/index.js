@@ -5,6 +5,7 @@ let audioCtx = null;
 let sttNode = null;
 let pingTimer = null;
 let lastRTT = null;
+let committedText = "";
 async function startAudioCapture(lang = "auto") {
     const video = document.querySelector("video");
     if (!video)
@@ -43,18 +44,14 @@ async function startAudioCapture(lang = "auto") {
         if (!msg.text)
             return;
         if (msg.type === "partial") {
-            displaySubtitle(msg.text, {
+            displaySubtitle(committedText + " " + msg.text, {
                 opacity: 0.4,
                 italic: true
             });
         }
-        if (msg.type === "final_vosk") {
-            displaySubtitle(msg.text, {
-                opacity: 0.7
-            });
-        }
         if (msg.type === "final") {
-            displaySubtitle(msg.text, {
+            committedText = msg.text;
+            displaySubtitle(committedText, {
                 opacity: 1.0
             });
         }
@@ -151,8 +148,6 @@ function displaySubtitle(text, opts) {
         makeSubtitleDraggableAndResizable(subtitleDiv);
     }
     subtitleDiv.textContent = text;
-    subtitleDiv.style.opacity = String(opts?.opacity ?? 1);
-    subtitleDiv.style.fontStyle = opts?.italic ? "italic" : "normal";
 }
 function clearSubtitle() {
     const subtitleDiv = document.getElementById("my-extension-subtitle");

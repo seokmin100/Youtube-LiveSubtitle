@@ -4,6 +4,7 @@ let audioCtx: AudioContext | null = null;
 let sttNode: AudioWorkletNode | null = null;
 let pingTimer: number | null = null;
 let lastRTT: number | null = null;
+let committedText = "";
 
 async function startAudioCapture(lang: string = "auto") {
   const video = document.querySelector<HTMLVideoElement>("video");
@@ -47,20 +48,15 @@ async function startAudioCapture(lang: string = "auto") {
     if (!msg.text) return;
 
     if (msg.type === "partial") {
-      displaySubtitle(msg.text, {
+      displaySubtitle(committedText + " " + msg.text, {
         opacity: 0.4,
         italic: true
       });
     }
 
-    if (msg.type === "final_vosk") {
-      displaySubtitle(msg.text, {
-        opacity: 0.7
-      });
-    }
-
     if (msg.type === "final") {
-      displaySubtitle(msg.text, {
+      committedText = msg.text;
+      displaySubtitle(committedText, {
         opacity: 1.0
       });
     }
@@ -169,8 +165,6 @@ function displaySubtitle(text: string, opts?: { opacity?: number; italic?: boole
   }
 
   subtitleDiv.textContent = text;
-  subtitleDiv.style.opacity = String(opts?.opacity ?? 1);
-  subtitleDiv.style.fontStyle = opts?.italic ? "italic" : "normal";
 }
 
 function clearSubtitle() {
