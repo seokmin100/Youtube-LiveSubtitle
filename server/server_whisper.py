@@ -4,9 +4,10 @@ import json
 import numpy as np
 from faster_whisper import WhisperModel
 
+
 # ---------------- CONFIG ----------------
 SAMPLE_RATE = 16000
-CHUNK_SEC = 1.0
+CHUNK_SEC = 1.2
 CHUNK_SIZE = int(SAMPLE_RATE * CHUNK_SEC)
 
 # ---------------- MODEL ----------------
@@ -14,8 +15,8 @@ whisper = WhisperModel(
     "small",
     device="cpu",
     compute_type="int8",
-    cpu_threads=24,
-    num_workers=3
+    cpu_threads=32,
+    num_workers=10
 )
 
 # ---------------- WORKER ----------------
@@ -26,8 +27,8 @@ async def whisper_worker(queue: asyncio.Queue, ws):
             segments, _ = whisper.transcribe(
                 audio,
                 language="ko",
-                beam_size=1,
-                best_of=3,
+                beam_size=2,
+                best_of=2,
                 temperature=0.0,
                 condition_on_previous_text=False
             )
