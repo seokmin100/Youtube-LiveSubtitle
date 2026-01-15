@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 # -----------------------------
-# Whisper 모델 설정 (CPU 최적화)
+# Whisper 모델 설정
 # -----------------------------
 model = WhisperModel(
     "small",
@@ -26,24 +26,19 @@ STEP_SECONDS = 0.5
 STEP_SIZE = int(SAMPLE_RATE * STEP_SECONDS)
 
 # -----------------------------
-# SQLite DB 초기화
+# SQLite DB 초기화 (모든 영상/화자 공유)
 # -----------------------------
 conn = sqlite3.connect("stt_cache.db")
 cursor = conn.cursor()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS subtitles (
-    session_id TEXT,
-    speaker_id TEXT,
-    start_time REAL,
-    end_time REAL,
-    text TEXT,
-    PRIMARY KEY(session_id, start_time)
+    text TEXT PRIMARY KEY
 )
 """)
 conn.commit()
 
 # -----------------------------
-# STT 실행 함수
+# STT 실행
 # -----------------------------
 async def run_stt(audio):
     loop = asyncio.get_running_loop()
@@ -62,46 +57,29 @@ async def run_stt(audio):
     )
 
 # -----------------------------
-# DB 저장 & 문맥 보정
+# DB 기반 자동 교정
 # -----------------------------
-def save_and_correct(session_id, speaker_id, start_time, end_time, text):
-    # 기존 문장과 유사하면 merge
-    cursor.execute("""
-        SELECT text FROM subtitles
-        WHERE session_id=? AND speaker_id=? AND end_time>=?
-        ORDER BY start_time DESC LIMIT 1
-    """, (session_id, speaker_id, start_time))
-    row = cursor.fetchone()
-    if row:
-        prev_text = row[0]
-        # 단순 merge: 이전 텍스트 + 현재 텍스트 차이만 추가
-        new_text = prev_text + " " + text if text not in prev_text else prev_text
-        cursor.execute("""
-            UPDATE subtitles SET text=?, end_time=? 
-            WHERE session_id=? AND speaker_id=? AND end_time>=?
-        """, (new_text, end_time, session_id, speaker_id, start_time))
-    else:
-        cursor.execute("""
-            INSERT OR REPLACE INTO subtitles (session_id, speaker_id, start_time, end_time, text)
-            VALUES (?, ?, ?, ?, ?)
-        """, (session_id, speaker_id, start_time, end_time, text))
+def db_correct(text):
+    # 비슷한 텍스트가 DB에 있으면 교정
+    cursor.execute("SELECT text FROM subtitles")
+    rows = cursor.fetchall()
+    for row in rows:
+        cached = row[0]
+        # 단순 유사도 비교 (여기선 포함 여부)
+        if text in cached or cached in text:
+            return cached
+    # DB에 없는 경우 새로 추가
+    cursor.execute("INSERT OR IGNORE INTO subtitles (text) VALUES (?)", (text,))
     conn.commit()
-    return text  # 교정된 텍스트 반환
+    return text
 
 # -----------------------------
 # WebSocket 핸들러
 # -----------------------------
 async def handler(ws):
-    # 클라이언트가 session_id, speaker_id 보내온다고 가정
-    initial_msg = await ws.recv()
-    if not isinstance(initial_msg, str):
-        await ws.close()
-        return
-    session_id, speaker_id = initial_msg.split(":")
-    print(f"Client connected: {session_id}, speaker: {speaker_id}")
-
     audio_buffer = np.array([], dtype=np.float32)
-    start_time = datetime.now().timestamp()
+    stt_busy = False
+    print("Client connected")
 
     async for message in ws:
         if isinstance(message, str):
@@ -112,45 +90,42 @@ async def handler(ws):
         if not isinstance(message, bytes):
             continue
 
-        # 오디오 전처리
+        # Int16 PCM → float32 + normalization
         chunk = np.frombuffer(message, dtype=np.int16).astype(np.float32) / 32768.0
         chunk -= np.mean(chunk)
         chunk /= (np.max(np.abs(chunk)) + 1e-6)
         audio_buffer = np.concatenate([audio_buffer, chunk])
 
+        # STT 중이면 과거 오디오 버림
+        if stt_busy:
+            audio_buffer = audio_buffer[-WINDOW_SIZE:]
+            continue
+
         # 슬라이딩 윈도우 처리
         while len(audio_buffer) >= WINDOW_SIZE:
             audio_chunk = audio_buffer[:WINDOW_SIZE]
             audio_buffer = audio_buffer[STEP_SIZE:]
+            stt_busy = True
 
-            chunk_start_time = start_time
-            start_time += STEP_SECONDS
-
-            async def stt_task(audio_chunk, chunk_start_time):
+            async def stt_task(audio_chunk):
+                nonlocal stt_busy
                 try:
                     segments, _ = await run_stt(audio_chunk)
                     text = "".join(seg.text for seg in segments).strip()
                     if len(text.replace(" ", "")) >= 1:
-                        # DB 저장 + 문맥/merge 보정
-                        corrected = save_and_correct(
-                            session_id,
-                            speaker_id,
-                            chunk_start_time,
-                            chunk_start_time + WINDOW_SECONDS,
-                            text
-                        )
+                        corrected = db_correct(text)
                         await ws.send(corrected)
-                except Exception as e:
-                    print("STT error:", e)
+                finally:
+                    stt_busy = False
 
-            asyncio.create_task(stt_task(audio_chunk, chunk_start_time))
+            asyncio.create_task(stt_task(audio_chunk))
 
 # -----------------------------
 # 서버 실행
 # -----------------------------
 async def main():
     async with websockets.serve(handler, "0.0.0.0", 3000, max_size=None):
-        print("CPU 32-core 실시간 STT Server started :3000")
+        print("CPU 32-core STT Server + DB Auto-Correct started :3000")
         await asyncio.Future()
 
 asyncio.run(main())
