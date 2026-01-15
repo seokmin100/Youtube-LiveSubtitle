@@ -4,7 +4,6 @@ import numpy as np
 import sqlite3
 from faster_whisper import WhisperModel
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 
 # -----------------------------
 # Whisper 모델 설정
@@ -14,17 +13,17 @@ model = WhisperModel(
     device="cpu",
     compute_type="int8",
     cpu_threads=32,
-    num_workers=3
+    num_workers=20
 )
 
 executor = ThreadPoolExecutor(max_workers=3)
-audio_queue = asyncio.Queue()
 
 SAMPLE_RATE = 16000
 WINDOW_SECONDS = 1.2
 WINDOW_SIZE = int(SAMPLE_RATE * WINDOW_SECONDS)
 STEP_SECONDS = 0.5
 STEP_SIZE = int(SAMPLE_RATE * STEP_SECONDS)
+MAX_QUEUE_SIZE = 4  # 오래된 오디오 chunk 제한
 
 # -----------------------------
 # SQLite DB 초기화 (모든 영상/화자 공유)
@@ -61,15 +60,12 @@ async def run_stt(audio):
 # DB 기반 자동 교정
 # -----------------------------
 def db_correct(text):
-    # 비슷한 텍스트가 DB에 있으면 교정
     cursor.execute("SELECT text FROM subtitles")
     rows = cursor.fetchall()
     for row in rows:
         cached = row[0]
-        # 단순 유사도 비교 (여기선 포함 여부)
         if text in cached or cached in text:
             return cached
-    # DB에 없는 경우 새로 추가
     cursor.execute("INSERT OR IGNORE INTO subtitles (text) VALUES (?)", (text,))
     conn.commit()
     return text
@@ -77,38 +73,54 @@ def db_correct(text):
 # -----------------------------
 # STT Worker
 # -----------------------------
-async def stt_worker(ws):
+async def stt_worker(ws, queue):
     while True:
-        audio_chunk = await audio_queue.get()
+        audio_chunk = await queue.get()
         try:
             segments, _ = await run_stt(audio_chunk)
             for seg in segments:
                 text = seg.text.strip()
-                if not text: 
+                if not text:
                     continue
                 corrected = db_correct(text)
                 await ws.send(corrected)
-        except Exception as e:
-            print("STT Error:", e)
+        except websockets.ConnectionClosed:
+            print("WebSocket closed, stopping worker")
+            break
         finally:
-            audio_queue.task_done()
+            queue.task_done()
+
+# -----------------------------
+# 큐 초기화 함수 (영상 전환 시)
+# -----------------------------
+async def clear_queue(queue):
+    while not queue.empty():
+        try:
+            queue.get_nowait()
+            queue.task_done()
+        except asyncio.QueueEmpty:
+            break
 
 # -----------------------------
 # WebSocket 핸들러
 # -----------------------------
 async def handler(ws):
+    audio_queue = asyncio.Queue()
     audio_buffer = np.array([], dtype=np.float32)
-    # 각 클라이언트마다 worker 실행
-    asyncio.create_task(stt_worker(ws))
+    worker_task = asyncio.create_task(stt_worker(ws, audio_queue))
     print("Client connected")
 
-    async for message in ws:
-        if isinstance(message, str) and message.startswith("ping:"):
-            await ws.send(message)
-            continue
+    try:
+        async for message in ws:
+            if isinstance(message, str) and message.startswith("ping:"):
+                await ws.send(message)
+                continue
 
-        if isinstance(message, bytes):
-            chunk = np.frombuffer(message, dtype=np.int16).astype(np.float32)/32768.0
+            if not isinstance(message, bytes):
+                continue
+
+            # Int16 PCM → float32 + normalization
+            chunk = np.frombuffer(message, dtype=np.int16).astype(np.float32) / 32768.0
             chunk -= np.mean(chunk)
             chunk /= (np.max(np.abs(chunk)) + 1e-6)
             audio_buffer = np.concatenate([audio_buffer, chunk])
@@ -117,32 +129,19 @@ async def handler(ws):
             while len(audio_buffer) >= WINDOW_SIZE:
                 audio_chunk = audio_buffer[:WINDOW_SIZE]
                 audio_buffer = audio_buffer[STEP_SIZE:]
+
+                # 큐가 너무 크면 오래된 chunk 제거
+                if audio_queue.qsize() >= MAX_QUEUE_SIZE:
+                    await audio_queue.get()
+                    audio_queue.task_done()
+
                 await audio_queue.put(audio_chunk)
 
-        # # Int16 PCM → float32 + normalization
-        # chunk = np.frombuffer(message, dtype=np.int16).astype(np.float32) / 32768.0
-        # chunk -= np.mean(chunk)
-        # chunk /= (np.max(np.abs(chunk)) + 1e-6)
-        # audio_buffer = np.concatenate([audio_buffer, chunk])
-
-        # # 슬라이딩 윈도우 처리
-        # while len(audio_buffer) >= WINDOW_SIZE:
-        #     audio_chunk = audio_buffer[:WINDOW_SIZE]
-        #     audio_buffer = audio_buffer[STEP_SIZE:]
-        #     stt_busy = True
-
-        #     async def stt_task(audio_chunk):
-        #         nonlocal stt_busy
-        #         try:
-        #             segments, _ = await run_stt(audio_chunk)
-        #             text = "".join(seg.text for seg in segments).strip()
-        #             if len(text.replace(" ", "")) >= 1:
-        #                 corrected = db_correct(text)
-        #                 await ws.send(corrected)
-        #         finally:
-        #             stt_busy = False
-
-        #     asyncio.create_task(stt_task(audio_chunk))
+    except websockets.ConnectionClosed:
+        print("Client disconnected")
+    finally:
+        worker_task.cancel()
+        await clear_queue(audio_queue)
 
 # -----------------------------
 # 서버 실행
