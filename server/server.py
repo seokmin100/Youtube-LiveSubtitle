@@ -18,6 +18,7 @@ model = WhisperModel(
 )
 
 executor = ThreadPoolExecutor(max_workers=3)
+audio_queue = asyncio.Queue()
 
 SAMPLE_RATE = 16000
 WINDOW_SECONDS = 1.2
@@ -74,51 +75,74 @@ def db_correct(text):
     return text
 
 # -----------------------------
+# STT Worker
+# -----------------------------
+async def stt_worker(ws):
+    while True:
+        audio_chunk = await audio_queue.get()
+        try:
+            segments, _ = await run_stt(audio_chunk)
+            for seg in segments:
+                text = seg.text.strip()
+                if not text: 
+                    continue
+                corrected = db_correct(text)
+                await ws.send(corrected)
+        except Exception as e:
+            print("STT Error:", e)
+        finally:
+            audio_queue.task_done()
+
+# -----------------------------
 # WebSocket 핸들러
 # -----------------------------
 async def handler(ws):
     audio_buffer = np.array([], dtype=np.float32)
-    stt_busy = False
+    # 각 클라이언트마다 worker 실행
+    asyncio.create_task(stt_worker(ws))
     print("Client connected")
 
     async for message in ws:
-        if isinstance(message, str):
-            if message.startswith("ping:"):
-                await ws.send(message)
-                continue
-
-        if not isinstance(message, bytes):
+        if isinstance(message, str) and message.startswith("ping:"):
+            await ws.send(message)
             continue
 
-        # Int16 PCM → float32 + normalization
-        chunk = np.frombuffer(message, dtype=np.int16).astype(np.float32) / 32768.0
-        chunk -= np.mean(chunk)
-        chunk /= (np.max(np.abs(chunk)) + 1e-6)
-        audio_buffer = np.concatenate([audio_buffer, chunk])
+        if isinstance(message, bytes):
+            chunk = np.frombuffer(message, dtype=np.int16).astype(np.float32)/32768.0
+            chunk -= np.mean(chunk)
+            chunk /= (np.max(np.abs(chunk)) + 1e-6)
+            audio_buffer = np.concatenate([audio_buffer, chunk])
 
-        # STT 중이면 과거 오디오 버림
-        if stt_busy:
-            audio_buffer = audio_buffer[-WINDOW_SIZE:]
-            continue
+            # 슬라이딩 윈도우
+            while len(audio_buffer) >= WINDOW_SIZE:
+                audio_chunk = audio_buffer[:WINDOW_SIZE]
+                audio_buffer = audio_buffer[STEP_SIZE:]
+                await audio_queue.put(audio_chunk)
 
-        # 슬라이딩 윈도우 처리
-        while len(audio_buffer) >= WINDOW_SIZE:
-            audio_chunk = audio_buffer[:WINDOW_SIZE]
-            audio_buffer = audio_buffer[STEP_SIZE:]
-            stt_busy = True
+        # # Int16 PCM → float32 + normalization
+        # chunk = np.frombuffer(message, dtype=np.int16).astype(np.float32) / 32768.0
+        # chunk -= np.mean(chunk)
+        # chunk /= (np.max(np.abs(chunk)) + 1e-6)
+        # audio_buffer = np.concatenate([audio_buffer, chunk])
 
-            async def stt_task(audio_chunk):
-                nonlocal stt_busy
-                try:
-                    segments, _ = await run_stt(audio_chunk)
-                    text = "".join(seg.text for seg in segments).strip()
-                    if len(text.replace(" ", "")) >= 1:
-                        corrected = db_correct(text)
-                        await ws.send(corrected)
-                finally:
-                    stt_busy = False
+        # # 슬라이딩 윈도우 처리
+        # while len(audio_buffer) >= WINDOW_SIZE:
+        #     audio_chunk = audio_buffer[:WINDOW_SIZE]
+        #     audio_buffer = audio_buffer[STEP_SIZE:]
+        #     stt_busy = True
 
-            asyncio.create_task(stt_task(audio_chunk))
+        #     async def stt_task(audio_chunk):
+        #         nonlocal stt_busy
+        #         try:
+        #             segments, _ = await run_stt(audio_chunk)
+        #             text = "".join(seg.text for seg in segments).strip()
+        #             if len(text.replace(" ", "")) >= 1:
+        #                 corrected = db_correct(text)
+        #                 await ws.send(corrected)
+        #         finally:
+        #             stt_busy = False
+
+        #     asyncio.create_task(stt_task(audio_chunk))
 
 # -----------------------------
 # 서버 실행
