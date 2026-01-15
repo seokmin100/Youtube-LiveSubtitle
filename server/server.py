@@ -29,8 +29,8 @@ async def run_stt(audio):
             audio,
             language="ko",
             vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=300),
-            beam_size=2,
+            vad_parameters=dict(min_silence_duration_ms=600),
+            beam_size=5,
             best_of=2,
             temperature=0.0,
             condition_on_previous_text=False
@@ -53,6 +53,7 @@ async def handler(ws):
 
         # Int16 PCM → float32
         chunk = np.frombuffer(message, dtype=np.int16).astype(np.float32) / 32768.0
+        chunk = chunk / np.max(np.abs(chunk) + 1e-6)  # peak normalization
         audio_buffer = np.concatenate([audio_buffer, chunk])
 
         # STT 중이면 과거 오디오 버림
