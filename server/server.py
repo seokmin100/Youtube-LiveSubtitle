@@ -32,7 +32,8 @@ conn = sqlite3.connect("stt_cache.db")
 cursor = conn.cursor()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS subtitles (
-    text TEXT PRIMARY KEY
+    text TEXT PRIMARY KEY,
+    confidence INTEGER DEFAULT 1
 )
 """)
 conn.commit()
@@ -59,16 +60,23 @@ async def run_stt(audio):
 # -----------------------------
 # DB 기반 자동 교정
 # -----------------------------
-def db_correct(text):
-    cursor.execute("SELECT text FROM subtitles")
-    rows = cursor.fetchall()
-    for row in rows:
-        cached = row[0]
-        if text in cached or cached in text:
-            return cached
-    cursor.execute("INSERT OR IGNORE INTO subtitles (text) VALUES (?)", (text,))
+def db_commit(text):
+    cursor.execute("""
+        INSERT INTO subtitles (text, confidence)
+        VALUES (?, 1)
+        ON CONFLICT(text)
+        DO UPDATE SET confidence = confidence + 1
+    """, (text,))
     conn.commit()
-    return text
+
+
+def db_is_stable(text, threshold=3):
+    cursor.execute(
+        "SELECT confidence FROM subtitles WHERE text = ?",
+        (text,)
+    )
+    row = cursor.fetchone()
+    return row is not None and row[0] >= threshold
 
 # -----------------------------
 # STT Worker
@@ -77,15 +85,22 @@ async def stt_worker(ws, queue):
     while True:
         audio_chunk = await queue.get()
         try:
-            segments, _ = await run_stt(audio_chunk)
+            segments, info = await run_stt(audio_chunk)
+
             for seg in segments:
                 text = seg.text.strip()
                 if not text:
                     continue
-                corrected = db_correct(text)
-                await ws.send(corrected)
+
+                if seg.no_speech_prob < 0.3:
+                    db_commit(text)
+
+                if db_is_stable(text):
+                    await ws.send(text)      # 확정
+                else:
+                    await ws.send(f"~{text}")  # 임시
+
         except websockets.ConnectionClosed:
-            print("WebSocket closed, stopping worker")
             break
         finally:
             queue.task_done()
