@@ -13,7 +13,7 @@ model = WhisperModel(
     device="cpu",
     compute_type="int8",
     cpu_threads=32,
-    num_workers=20
+    num_workers=10
 )
 
 executor = ThreadPoolExecutor(max_workers=3)
@@ -74,16 +74,27 @@ def db_correct(text):
 # STT Worker
 # -----------------------------
 async def stt_worker(ws, queue):
+    last_text = ""
+
     while True:
         audio_chunk = await queue.get()
         try:
             segments, _ = await run_stt(audio_chunk)
-            for seg in segments:
-                text = seg.text.strip()
-                if not text:
-                    continue
-                corrected = db_correct(text)
-                await ws.send(corrected)
+            text = "".join(seg.text for seg in segments).strip()
+
+            if not text:
+                continue
+
+            corrected = db_correct(text)
+
+            # 🔥 단어 단위 diff
+            new_words = diff_words(corrected, last_text)
+
+            for word in new_words:
+                await ws.send(word)   # ⭐ 단어 단위 전송
+
+            last_text = corrected
+
         except websockets.ConnectionClosed:
             print("WebSocket closed, stopping worker")
             break
@@ -100,6 +111,22 @@ async def clear_queue(queue):
             queue.task_done()
         except asyncio.QueueEmpty:
             break
+
+# -----------------------------
+# 단어 차이점 추출 함수
+# -----------------------------
+def diff_words(new_text, last_text):
+    new_words = new_text.split()
+    last_words = last_text.split()
+
+    i = 0
+    while i < min(len(new_words), len(last_words)):
+        if new_words[i] != last_words[i]:
+            break
+        i += 1
+
+    return new_words[i:]
+
 
 # -----------------------------
 # WebSocket 핸들러
